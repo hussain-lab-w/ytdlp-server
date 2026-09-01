@@ -60,9 +60,10 @@ def resolve(body: ResolveBody, x_api_key: Optional[str] = Header(None)):
         fmt = "bestaudio/best"
     else:
         h = "".join(ch for ch in body.quality if ch.isdigit()) or "720"
-        # نفضل صيغة progressive (فيديو+صوت بملف وحد) عشان نعطي رابط مباشر
-        # بدون حاجة لدمج (mux) على السيرفر، وهذا يخليها أسرع بكثير.
-        fmt = f"best[height<={h}][ext=mp4]/best[height<={h}]/best"
+        # نطلب صراحة صيغة فيها فيديو+صوت مع بعض (progressive). لو ما أكو
+        # صيغة هيج (يوتيوب هسه أغلب الجودات فوق 360p تجيب فيديو وصوت
+        # منفصلين)، نخلي yt-dlp يرمي خطأ عشان نكتشف الحالة ونحولها لدمج.
+        fmt = f"best[height<={h}][vcodec!=none][acodec!=none]/best[vcodec!=none][acodec!=none]"
 
     ydl_opts = {
         "format": fmt,
@@ -72,16 +73,26 @@ def resolve(body: ResolveBody, x_api_key: Optional[str] = Header(None)):
         "skip_download": True,
     }
 
+    needs_merge = False
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(body.url, download=False)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"تعذر تحليل الرابط: {e}")
-
-    direct_url = info.get("url")
-    # لو الصيغة المختارة فصلت فيديو عن صوت (requested_formats)، نحتاج ندمجها
-    # عبر /download بدل ما نرجع رابط مباشر ناقص صوت.
-    needs_merge = not direct_url and info.get("requested_formats")
+        direct_url = info.get("url")
+        # تأكيد إضافي: لازم الصيغة المرجعة فيها فيديو وصوت مع بعض فعلاً
+        if not body.audio_only and (info.get("vcodec") in (None, "none") or info.get("acodec") in (None, "none")):
+            direct_url = None
+            needs_merge = True
+    except Exception:
+        # ما أكو صيغة progressive تطابق الطلب → نحتاج ندمج فيديو+صوت
+        # عبر /download. نجيب بيانات أساسية بس (بدون تحديد صيغة) عشان
+        # نعرض العنوان والصورة المصغرة للمستخدم.
+        try:
+            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "noplaylist": True, "skip_download": True}) as ydl:
+                info = ydl.extract_info(body.url, download=False)
+        except Exception as e2:
+            raise HTTPException(status_code=400, detail=f"تعذر تحليل الرابط: {e2}")
+        direct_url = None
+        needs_merge = True
 
     return {
         "ok": True,
